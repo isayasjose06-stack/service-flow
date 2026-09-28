@@ -1,0 +1,699 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis(version: "3")]
+}
+
+// ============================================================================
+// ENUMS (Match exactly with Phase 0 and shared types)
+// ============================================================================
+
+enum UserRole {
+  CLIENT
+  TECHNICIAN
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+  PENDING_VERIFICATION
+}
+
+enum VerificationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  REQUIRES_UPDATE
+}
+
+enum VerificationDocumentType {
+  ID_DOCUMENT
+  CERTIFICATION
+  BACKGROUND_CHECK
+  INSURANCE
+  OTHER
+}
+
+enum VerificationDocumentStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ServiceRequestStatus {
+  PENDING
+  MATCHING
+  OFFER_RECEIVED
+  TECHNICIAN_SELECTED
+  NO_MATCH
+  EXPIRED
+  CANCELLED_BY_CLIENT
+}
+
+enum ServiceRequestMatchStatus {
+  MATCHED
+  VIEWED
+  OFFER_SENT
+  REJECTED
+  EXPIRED
+}
+
+enum OfferStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  WITHDRAWN
+  EXPIRED
+}
+
+enum ServiceStatus {
+  CONFIRMED
+  ON_THE_WAY
+  ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  PAID
+  RATED
+  CANCELLED_BY_CLIENT
+  CANCELLED_BY_TECHNICIAN
+  DISPUTED
+}
+
+enum PaymentMethod {
+  CASH
+  NEQUI
+  TRANSFER
+  OTHER
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  CANCELLED
+}
+
+enum ServiceImagePhase {
+  INITIAL
+  DIAGNOSIS
+  WORK
+  FINAL
+}
+
+enum MessageType {
+  TEXT
+  IMAGE
+  SYSTEM
+}
+
+enum NotificationType {
+  SERVICE_REQUEST_CREATED
+  MATCH_FOUND
+  TECHNICIAN_RESPONSE
+  TECHNICIAN_SELECTED
+  SERVICE_CONFIRMED
+  TECHNICIAN_ON_THE_WAY
+  TECHNICIAN_ARRIVED
+  SERVICE_STARTED
+  SERVICE_COMPLETED
+  PAYMENT_REGISTERED
+  RATING_RECEIVED
+  NEW_MESSAGE
+  SERVICE_CANCELLED
+  REQUEST_EXPIRED
+  DOCUMENT_STATUS_CHANGED
+  ACCOUNT_STATUS_CHANGED
+  SYSTEM
+}
+
+// ============================================================================
+// MODELS
+// ============================================================================
+
+model User {
+  id            String     @id @default(uuid()) @db.Uuid
+  email         String     @unique @db.VarChar
+  passwordHash  String     @db.VarChar
+  firstName     String     @db.VarChar
+  lastName      String     @db.VarChar
+  phone         String?    @db.VarChar
+  avatarUrl     String?    @db.VarChar
+  role          UserRole
+  status        UserStatus @default(PENDING_VERIFICATION)
+  emailVerified Boolean    @default(false)
+  lastLoginAt   DateTime?  @db.Timestamp(6)
+  createdAt     DateTime   @default(now()) @db.Timestamp(6)
+  updatedAt     DateTime   @updatedAt @db.Timestamp(6)
+
+  // Relations
+  clientProfile     ClientProfile?
+  technicianProfile TechnicianProfile?
+  addresses         Address[]
+  notifications     Notification[]
+  pushSubscriptions PushSubscription[]
+
+  // Interactions
+  clientRequests        ServiceRequest[]       @relation("ClientRequests")
+  matchedRequests       ServiceRequestMatch[]
+  offers                Offer[]
+  clientServices        Service[]              @relation("ClientServices")
+  technicianServices    Service[]              @relation("TechnicianServices")
+  cancelledServices     Service[]              @relation("ServiceCancelledBy")
+  statusHistoryChanges  ServiceStatusHistory[]
+  uploadedServiceImages ServiceImage[]
+
+  // Ratings and Chat
+  ratingsGiven          Rating[]       @relation("RatingFrom")
+  ratingsReceived       Rating[]       @relation("RatingTo")
+  messages              Message[]
+  conversationsAsClient Conversation[] @relation("ConversationClient")
+  conversationsAsTech   Conversation[] @relation("ConversationTechnician")
+
+  // Admin
+  reviewedDocuments VerificationDocument[]
+  updatedConfigs    PlatformConfig[]
+  adminAuditLogs    AdminAuditLog[]        @relation("AdminAuditLogs")
+
+  // Incidents
+  reportedIncidents Incident[]     @relation("IncidentReporter")
+  targetedIncidents Incident[]     @relation("IncidentTarget")
+  assignedIncidents Incident[]     @relation("IncidentAssignee")
+  UserLocation      UserLocation[]
+
+  @@index([role, status])
+}
+
+model ClientProfile {
+  id                     String   @id @default(uuid()) @db.Uuid
+  userId                 String   @unique @db.Uuid
+  preferredLanguage      String   @default("es") @db.VarChar
+  totalServicesRequested Int      @default(0)
+  averageRating          Decimal? @db.Decimal(3, 2)
+  createdAt              DateTime @default(now()) @db.Timestamp(6)
+  updatedAt              DateTime @updatedAt @db.Timestamp(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model TechnicianProfile {
+  id                      String             @id @default(uuid()) @db.Uuid
+  userId                  String             @unique @db.Uuid
+  professionalDescription String?            @db.Text
+  yearsOfExperience       Int?
+  isAvailable             Boolean            @default(false)
+  isVerified              Boolean            @default(false)
+  verificationStatus      VerificationStatus @default(PENDING)
+  totalServicesCompleted  Int                @default(0)
+  averageRating           Decimal?           @db.Decimal(3, 2)
+  acceptanceRate          Decimal?           @db.Decimal(5, 2)
+  responseTimeAvg         Int? // in minutes
+  createdAt               DateTime           @default(now()) @db.Timestamp(6)
+  updatedAt               DateTime           @updatedAt @db.Timestamp(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  specialties    TechnicianSpecialty[]
+  documents      VerificationDocument[]
+  coverageZones  CoverageZone[]
+  availabilities TechnicianAvailability[]
+
+  @@index([isAvailable, isVerified])
+}
+
+model TechnicianAvailability {
+  id                  String   @id @default(uuid()) @db.Uuid
+  technicianProfileId String   @db.Uuid
+  dayOfWeek           String   @db.VarChar
+  startTime           String   @db.VarChar
+  endTime             String   @db.VarChar
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now()) @db.Timestamp(6)
+  updatedAt           DateTime @updatedAt @db.Timestamp(6)
+
+  technicianProfile TechnicianProfile @relation(fields: [technicianProfileId], references: [id], onDelete: Cascade)
+
+  @@index([technicianProfileId])
+}
+
+model Category {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @db.VarChar
+  slug        String   @unique @db.VarChar
+  description String?  @db.Text
+  icon        String?  @db.VarChar
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamp(6)
+  updatedAt   DateTime @updatedAt @db.Timestamp(6)
+
+  subcategories         Subcategory[]
+  requirements          CategoryVerificationRequirement[]
+  technicianSpecialties TechnicianSpecialty[]
+  serviceRequests       ServiceRequest[]
+}
+
+model Subcategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  categoryId  String   @db.Uuid
+  name        String   @db.VarChar
+  slug        String   @unique @db.VarChar
+  description String?  @db.Text
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now()) @db.Timestamp(6)
+  updatedAt   DateTime @updatedAt @db.Timestamp(6)
+
+  category              Category              @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  technicianSpecialties TechnicianSpecialty[]
+  serviceRequests       ServiceRequest[]
+}
+
+model CategoryVerificationRequirement {
+  id           String                   @id @default(uuid()) @db.Uuid
+  categoryId   String                   @db.Uuid
+  documentType VerificationDocumentType
+  isRequired   Boolean                  @default(true)
+  description  String?                  @db.Text
+  createdAt    DateTime                 @default(now()) @db.Timestamp(6)
+  updatedAt    DateTime                 @updatedAt @db.Timestamp(6)
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@unique([categoryId, documentType])
+}
+
+model TechnicianSpecialty {
+  id                  String   @id @default(uuid()) @db.Uuid
+  technicianProfileId String   @db.Uuid
+  categoryId          String   @db.Uuid
+  subcategoryId       String?  @db.Uuid
+  createdAt           DateTime @default(now()) @db.Timestamp(6)
+
+  technicianProfile TechnicianProfile @relation(fields: [technicianProfileId], references: [id], onDelete: Cascade)
+  category          Category          @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  subcategory       Subcategory?      @relation(fields: [subcategoryId], references: [id], onDelete: SetNull)
+
+  @@unique([technicianProfileId, categoryId, subcategoryId])
+  @@index([categoryId])
+  @@index([subcategoryId])
+  @@index([technicianProfileId])
+}
+
+model CoverageZone {
+  id                  String                                @id @default(uuid()) @db.Uuid
+  technicianProfileId String                                @db.Uuid
+  city                String                                @db.VarChar
+  latitude            Decimal                               @db.Decimal(10, 8)
+  longitude           Decimal                               @db.Decimal(11, 8)
+  geom                Unsupported("geography(Point,4326)")?
+  radiusKm            Decimal                               @default(10) @db.Decimal(5, 2)
+  isActive            Boolean                               @default(true)
+  createdAt           DateTime                              @default(now()) @db.Timestamp(6)
+  updatedAt           DateTime                              @updatedAt @db.Timestamp(6)
+
+  technicianProfile TechnicianProfile @relation(fields: [technicianProfileId], references: [id], onDelete: Cascade)
+
+  // Note: GIST index for geom will be created via manual SQL migration
+}
+
+model Address {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  label     String?  @db.VarChar
+  street    String   @db.VarChar
+  city      String   @db.VarChar
+  state     String?  @db.VarChar
+  country   String   @default("CO") @db.VarChar
+  latitude  Decimal? @db.Decimal(10, 8)
+  longitude Decimal? @db.Decimal(11, 8)
+  reference String?  @db.Text
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamp(6)
+  updatedAt DateTime @updatedAt @db.Timestamp(6)
+
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  serviceRequests ServiceRequest[]
+}
+
+model ServiceRequest {
+  id                 String                                @id @default(uuid()) @db.Uuid
+  clientId           String                                @db.Uuid
+  categoryId         String                                @db.Uuid
+  subcategoryId      String?                               @db.Uuid
+  title              String                                @db.VarChar
+  description        String                                @db.Text
+  addressId          String?                               @db.Uuid
+  addressText        String?                               @db.VarChar
+  city               String?                               @db.VarChar
+  latitude           Decimal?                              @db.Decimal(10, 8)
+  longitude          Decimal?                              @db.Decimal(11, 8)
+  location           Unsupported("geography(Point,4326)")?
+  scheduledDate      DateTime?                             @db.Date
+  scheduledTime      DateTime?                             @db.Time
+  isFlexibleSchedule Boolean                               @default(false)
+  budgetMin          Decimal?                              @db.Decimal(12, 2)
+  budgetMax          Decimal?                              @db.Decimal(12, 2)
+  currency           String                                @default("COP") @db.VarChar
+  status             ServiceRequestStatus                  @default(PENDING)
+  cancellationReason String?                               @db.Text
+  expiresAt          DateTime                              @db.Timestamp(6)
+  matchedCount       Int                                   @default(0)
+  createdAt          DateTime                              @default(now()) @db.Timestamp(6)
+  updatedAt          DateTime                              @updatedAt @db.Timestamp(6)
+
+  client      User         @relation("ClientRequests", fields: [clientId], references: [id])
+  category    Category     @relation(fields: [categoryId], references: [id])
+  subcategory Subcategory? @relation(fields: [subcategoryId], references: [id])
+  address     Address?     @relation(fields: [addressId], references: [id])
+
+  images  ServiceRequestImage[]
+  matches ServiceRequestMatch[]
+  offers  Offer[]
+  service Service?
+  // Note: GIST index for location will be created via manual SQL migration
+
+  @@index([status])
+  @@index([clientId])
+  @@index([categoryId])
+  @@index([expiresAt])
+}
+
+model ServiceRequestMatch {
+  id               String                    @id @default(uuid()) @db.Uuid
+  serviceRequestId String                    @db.Uuid
+  technicianId     String                    @db.Uuid
+  status           ServiceRequestMatchStatus @default(MATCHED)
+  matchedAt        DateTime                  @db.Timestamp(6)
+  notifiedAt       DateTime?                 @db.Timestamp(6)
+  viewedAt         DateTime?                 @db.Timestamp(6)
+  respondedAt      DateTime?                 @db.Timestamp(6)
+  expiresAt        DateTime                  @db.Timestamp(6)
+  createdAt        DateTime                  @default(now()) @db.Timestamp(6)
+  updatedAt        DateTime                  @updatedAt @db.Timestamp(6)
+
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
+  technician     User           @relation(fields: [technicianId], references: [id], onDelete: Cascade)
+
+  @@unique([serviceRequestId, technicianId])
+  @@index([serviceRequestId])
+  @@index([technicianId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model Offer {
+  id                String      @id @default(uuid()) @db.Uuid
+  serviceRequestId  String      @db.Uuid
+  technicianId      String      @db.Uuid
+  amount            Decimal     @db.Decimal(12, 2)
+  currency          String      @default("COP") @db.VarChar
+  estimatedDuration Int? // minutes
+  message           String?     @db.Text
+  status            OfferStatus @default(PENDING)
+  createdAt         DateTime    @default(now()) @db.Timestamp(6)
+  updatedAt         DateTime    @updatedAt @db.Timestamp(6)
+
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
+  technician     User           @relation(fields: [technicianId], references: [id], onDelete: Cascade)
+  service        Service?
+}
+
+model Service {
+  id                 String        @id @default(uuid()) @db.Uuid
+  serviceRequestId   String        @unique @db.Uuid
+  clientId           String        @db.Uuid
+  technicianId       String        @db.Uuid
+  offerId            String?       @unique @db.Uuid
+  status             ServiceStatus @default(CONFIRMED)
+  cancellationReason String?       @db.Text
+  cancelledById      String?       @db.Uuid
+  cancelledAt        DateTime?     @db.Timestamp(6)
+  diagnosis          String?       @db.Text
+  workSummary        String?       @db.Text
+  agreedAmount       Decimal?      @db.Decimal(12, 2)
+  finalAmount        Decimal?      @db.Decimal(12, 2)
+  currency           String        @default("COP") @db.VarChar
+  startedAt          DateTime?     @db.Timestamp(6)
+  completedAt        DateTime?     @db.Timestamp(6)
+  createdAt          DateTime      @default(now()) @db.Timestamp(6)
+  updatedAt          DateTime      @updatedAt @db.Timestamp(6)
+
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id])
+  offer          Offer?         @relation(fields: [offerId], references: [id])
+  client         User           @relation("ClientServices", fields: [clientId], references: [id])
+  technician     User           @relation("TechnicianServices", fields: [technicianId], references: [id])
+  cancelledBy    User?          @relation("ServiceCancelledBy", fields: [cancelledById], references: [id])
+
+  statusHistory ServiceStatusHistory[]
+  images        ServiceImage[]
+  materials     ServiceMaterial[]
+  payment       Payment?
+  ratings       Rating[]
+  conversation  Conversation?
+  incidents     Incident[]
+
+  @@index([status])
+  @@index([clientId])
+  @@index([technicianId])
+}
+
+model ServiceStatusHistory {
+  id          String   @id @default(uuid()) @db.Uuid
+  serviceId   String   @db.Uuid
+  fromStatus  String?  @db.VarChar
+  toStatus    String   @db.VarChar
+  changedById String   @db.Uuid
+  note        String?  @db.Text
+  createdAt   DateTime @default(now()) @db.Timestamp(6)
+
+  service   Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  changedBy User    @relation(fields: [changedById], references: [id])
+}
+
+model ServiceRequestImage {
+  id               String   @id @default(uuid()) @db.Uuid
+  serviceRequestId String   @db.Uuid
+  imageUrl         String   @db.VarChar
+  thumbnailUrl     String?  @db.VarChar
+  caption          String?  @db.Text
+  sortOrder        Int      @default(0)
+  createdAt        DateTime @default(now()) @db.Timestamp(6)
+
+  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
+}
+
+model ServiceImage {
+  id           String            @id @default(uuid()) @db.Uuid
+  serviceId    String            @db.Uuid
+  uploadedById String            @db.Uuid
+  imageUrl     String            @db.VarChar
+  thumbnailUrl String?           @db.VarChar
+  phase        ServiceImagePhase
+  caption      String?           @db.Text
+  sortOrder    Int               @default(0)
+  createdAt    DateTime          @default(now()) @db.Timestamp(6)
+
+  service    Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  uploadedBy User    @relation(fields: [uploadedById], references: [id])
+}
+
+model ServiceMaterial {
+  id          String   @id @default(uuid()) @db.Uuid
+  serviceId   String   @db.Uuid
+  name        String   @db.VarChar
+  description String?  @db.Text
+  quantity    Decimal  @default(1) @db.Decimal(10, 2)
+  unitPrice   Decimal  @db.Decimal(12, 2)
+  totalPrice  Decimal  @db.Decimal(12, 2)
+  currency    String   @default("COP") @db.VarChar
+  createdAt   DateTime @default(now()) @db.Timestamp(6)
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+}
+
+model Payment {
+  id                String        @id @default(uuid()) @db.Uuid
+  serviceId         String        @unique @db.Uuid
+  amount            Decimal       @db.Decimal(12, 2)
+  currency          String        @default("COP") @db.VarChar
+  method            PaymentMethod
+  status            PaymentStatus @default(PENDING)
+  externalReference String?       @db.VarChar
+  notes             String?       @db.Text
+  paidAt            DateTime?     @db.Timestamp(6)
+  createdAt         DateTime      @default(now()) @db.Timestamp(6)
+  updatedAt         DateTime      @updatedAt @db.Timestamp(6)
+
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+}
+
+model Rating {
+  id         String   @id @default(uuid()) @db.Uuid
+  serviceId  String   @db.Uuid
+  fromUserId String   @db.Uuid
+  toUserId   String   @db.Uuid
+  score      Int      @db.SmallInt
+  comment    String?  @db.Text
+  createdAt  DateTime @default(now()) @db.Timestamp(6)
+
+  service  Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  fromUser User    @relation("RatingFrom", fields: [fromUserId], references: [id])
+  toUser   User    @relation("RatingTo", fields: [toUserId], references: [id])
+  // Note: CHECK(fromUserId != toUserId) will be added via manual SQL migration
+  // Note: CHECK(score BETWEEN 1 AND 5) will be added via manual SQL migration
+
+  @@unique([serviceId, fromUserId])
+}
+
+model Conversation {
+  id           String   @id @default(uuid()) @db.Uuid
+  serviceId    String   @unique @db.Uuid
+  clientId     String   @db.Uuid
+  technicianId String   @db.Uuid
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamp(6)
+  updatedAt    DateTime @updatedAt @db.Timestamp(6)
+
+  service    Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  client     User      @relation("ConversationClient", fields: [clientId], references: [id])
+  technician User      @relation("ConversationTechnician", fields: [technicianId], references: [id])
+  messages   Message[]
+}
+
+model Message {
+  id             String      @id @default(uuid()) @db.Uuid
+  conversationId String      @db.Uuid
+  senderId       String      @db.Uuid
+  content        String      @db.Text
+  type           MessageType @default(TEXT)
+  isRead         Boolean     @default(false)
+  readAt         DateTime?   @db.Timestamp(6)
+  createdAt      DateTime    @default(now()) @db.Timestamp(6)
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id])
+
+  @@index([conversationId, createdAt])
+  @@index([senderId])
+}
+
+model VerificationDocument {
+  id                  String                     @id @default(uuid()) @db.Uuid
+  technicianProfileId String                     @db.Uuid
+  type                VerificationDocumentType
+  documentUrl         String                     @db.VarChar
+  status              VerificationDocumentStatus @default(PENDING)
+  reviewNote          String?                    @db.Text
+  reviewedById        String?                    @db.Uuid
+  reviewedAt          DateTime?                  @db.Timestamp(6)
+  createdAt           DateTime                   @default(now()) @db.Timestamp(6)
+  updatedAt           DateTime                   @updatedAt @db.Timestamp(6)
+
+  technicianProfile TechnicianProfile @relation(fields: [technicianProfileId], references: [id], onDelete: Cascade)
+  reviewedBy        User?             @relation(fields: [reviewedById], references: [id])
+}
+
+model Notification {
+  id             String           @id @default(uuid()) @db.Uuid
+  userId         String           @db.Uuid
+  type           NotificationType
+  title          String           @db.VarChar
+  body           String           @db.Text
+  data           Json?
+  readAt         DateTime?        @db.Timestamp(6)
+  emailStatus    String           @default("PENDING") @db.VarChar
+  pushStatus     String           @default("PENDING") @db.VarChar
+  idempotencyKey String?          @unique @db.VarChar
+  createdAt      DateTime         @default(now()) @db.Timestamp(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@index([emailStatus])
+}
+
+model PushSubscription {
+  id        String   @id @default(uuid()) @db.Uuid
+  userId    String   @db.Uuid
+  endpoint  String   @unique @db.Text
+  p256dh    String   @db.Text
+  auth      String   @db.Text
+  createdAt DateTime @default(now()) @db.Timestamp(6)
+  updatedAt DateTime @updatedAt @db.Timestamp(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PlatformConfig {
+  id          String   @id @default(uuid()) @db.Uuid
+  key         String   @unique @db.VarChar
+  value       String   @db.Text
+  description String?  @db.Text
+  updatedById String?  @db.Uuid
+  updatedAt   DateTime @updatedAt @db.Timestamp(6)
+
+  updatedBy User? @relation(fields: [updatedById], references: [id])
+}
+
+enum IncidentStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  CLOSED
+}
+
+model Incident {
+  id           String         @id @default(uuid()) @db.Uuid
+  reportedById String         @db.Uuid
+  serviceId    String?        @db.Uuid
+  targetUserId String?        @db.Uuid
+  type         String         @db.VarChar
+  description  String         @db.Text
+  status       IncidentStatus @default(OPEN)
+  assignedToId String?        @db.Uuid
+  resolution   String?        @db.Text
+  createdAt    DateTime       @default(now()) @db.Timestamp(6)
+  updatedAt    DateTime       @updatedAt @db.Timestamp(6)
+
+  reportedBy User     @relation("IncidentReporter", fields: [reportedById], references: [id])
+  targetUser User?    @relation("IncidentTarget", fields: [targetUserId], references: [id])
+  assignedTo User?    @relation("IncidentAssignee", fields: [assignedToId], references: [id])
+  service    Service? @relation(fields: [serviceId], references: [id])
+
+  @@index([status])
+  @@index([reportedById])
+  @@index([assignedToId])
+}
+
+model AdminAuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  adminId    String   @db.Uuid
+  action     String   @db.VarChar
+  entityType String   @db.VarChar
+  entityId   String?  @db.VarChar
+  metadata   Json?
+  createdAt  DateTime @default(now()) @db.Timestamp(6)
+
+  admin User @relation("AdminAuditLogs", fields: [adminId], references: [id])
+
+  @@index([adminId])
+  @@index([action])
+  @@index([entityType, entityId])
+}
+
+model UserLocation {
+  userId    String   @id @db.Uuid
+  latitude  Decimal  @db.Decimal(10, 8)
+  longitude Decimal  @db.Decimal(11, 8)
+  updatedAt DateTime @updatedAt @db.Timestamp(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
